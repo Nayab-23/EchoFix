@@ -99,9 +99,11 @@ def get_reddit_entries_by_status(
 
 
 def get_ready_reddit_entries(supabase: Client, limit: int = 100) -> List[RedditEntry]:
-    """Get Reddit entries ready for processing."""
+    """Get Reddit entries ready for processing (comments only, not posts)."""
     result = supabase.table("reddit_entries").select("*").eq(
         "status", RedditEntryStatus.READY.value
+    ).eq(
+        "reddit_type", "comment"
     ).is_("github_issue_url", "null").limit(limit).execute()
     return [RedditEntry(**entry) for entry in result.data] if result.data else []
 

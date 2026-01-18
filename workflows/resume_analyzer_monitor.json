@@ -1,0 +1,154 @@
+{
+  "name": "Resume Analyzer - Continuous Feedback Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 15
+            }
+          ]
+        }
+      },
+      "name": "Every 15 Seconds",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "id": "schedule-trigger"
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/api/reddit/ingest-seed",
+        "method": "POST",
+        "options": {}
+      },
+      "name": "Ingest Thread Comments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 300],
+      "id": "ingest-comments"
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/api/reddit/refresh-scores",
+        "method": "POST",
+        "options": {}
+      },
+      "name": "Refresh Scores",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [650, 300],
+      "id": "refresh-scores"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.ready_count}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "name": "Has READY Entries?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 300],
+      "id": "check-ready"
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/api/pipeline/auto-process-ready",
+        "method": "POST",
+        "options": {}
+      },
+      "name": "Auto-Process READY",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1050, 200],
+      "id": "auto-process"
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/api/stats",
+        "options": {}
+      },
+      "name": "Get Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1250, 300],
+      "id": "get-stats"
+    }
+  ],
+  "connections": {
+    "Every 15 Seconds": {
+      "main": [
+        [
+          {
+            "node": "Ingest Thread Comments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest Thread Comments": {
+      "main": [
+        [
+          {
+            "node": "Refresh Scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh Scores": {
+      "main": [
+        [
+          {
+            "node": "Has READY Entries?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has READY Entries?": {
+      "main": [
+        [
+          {
+            "node": "Auto-Process READY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-Process READY": {
+      "main": [
+        [
+          {
+            "node": "Get Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "id": "resume-analyzer-monitor",
+  "meta": {
+    "instanceId": "echofix"
+  },
+  "tags": []
+}

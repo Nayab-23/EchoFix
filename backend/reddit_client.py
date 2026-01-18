@@ -316,7 +316,45 @@ class RedditClient:
             logger.error(f"Error loading fixture {fixture_name}: {e}")
             return []
     
-    @staticmethod
+    def post_comment(self, parent_id: str, text: str) -> str:
+        """
+        Post a comment as a reply to a Reddit post/comment.
+
+        Args:
+            parent_id: Reddit ID of parent (comment or submission)
+            text: Comment text to post
+
+        Returns:
+            Comment ID of the posted comment
+        """
+        if self.demo_mode:
+            # In demo mode, generate a fake comment ID
+            demo_id = f"demo_{uuid4().hex[:7]}"
+            logger.info(f"DEMO: Would post comment to {parent_id}: {text[:100]}...")
+            return demo_id
+
+        try:
+            # Get the parent thing (comment or submission)
+            if parent_id.startswith('t3_'):
+                parent = self.reddit.submission(id=parent_id.replace('t3_', ''))
+            elif parent_id.startswith('t1_'):
+                parent = self.reddit.comment(id=parent_id.replace('t1_', ''))
+            else:
+                # Try without prefix
+                try:
+                    parent = self.reddit.comment(id=parent_id)
+                except:
+                    parent = self.reddit.submission(id=parent_id)
+
+            # Post the comment
+            comment = parent.reply(text)
+            logger.info(f"Posted comment {comment.id} to {parent_id}")
+            return comment.id
+
+        except Exception as e:
+            logger.error(f"Failed to post comment: {e}")
+            raise
+
     def create_demo_fixtures(entries: List[RedditEntry], filename: str):
         """
         Helper to create demo fixtures from live data.
@@ -324,12 +362,12 @@ class RedditClient:
         """
         fixtures_path = Path(__file__).parent / "fixtures"
         fixtures_path.mkdir(exist_ok=True)
-        
+
         filepath = fixtures_path / filename
-        
+
         data = [entry.model_dump(mode='json') for entry in entries]
-        
+
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2, default=str)
-        
+
         logger.info(f"Created fixture: {filepath} with {len(entries)} entries")

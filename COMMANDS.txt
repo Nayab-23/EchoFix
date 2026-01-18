@@ -1,0 +1,152 @@
+╔═══════════════════════════════════════════════════════════════╗
+║                  ECHOFIX DEPLOYMENT COMMANDS                  ║
+╚═══════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────┐
+│                      ESSENTIAL COMMANDS                       │
+└───────────────────────────────────────────────────────────────┘
+
+  🚀 DEPLOY (First Time)
+     ./deploy.sh
+     → Builds images, starts services, runs health checks
+
+  🛑 STOP EVERYTHING
+     ./stop.sh
+     → Gracefully stops all services (keeps data)
+
+  🔄 RESTART
+     ./restart.sh
+     → Stop and start (use after .env changes)
+
+  📊 CHECK STATUS
+     ./status.sh
+     → Shows health, containers, resource usage
+
+  📋 VIEW LOGS
+     ./logs.sh              # All services
+     ./logs.sh backend      # Backend only
+     ./logs.sh n8n          # n8n only
+
+  🔨 REBUILD (After Code Changes)
+     ./rebuild.sh
+     → Rebuilds Docker images and restarts
+
+  🗑️  COMPLETE TEARDOWN
+     ./teardown.sh
+     → ⚠️  Removes EVERYTHING (volumes, images)
+
+┌───────────────────────────────────────────────────────────────┐
+│                         SERVICE URLS                          │
+└───────────────────────────────────────────────────────────────┘
+
+  Backend API:      http://localhost:8000
+  Health Check:     http://localhost:8000/health
+  n8n Workflows:    http://localhost:5678
+
+┌───────────────────────────────────────────────────────────────┐
+│                    QUICK TROUBLESHOOTING                      │
+└───────────────────────────────────────────────────────────────┘
+
+  ❌ Backend not starting?
+     1. Check logs:    ./logs.sh backend
+     2. Verify .env:   cat backend/.env
+     3. Rebuild:       ./rebuild.sh
+
+  ❌ Port already in use?
+     Backend (8000):   lsof -ti:8000 | xargs kill -9
+     n8n (5678):       lsof -ti:5678 | xargs kill -9
+
+  ❌ Need fresh start?
+     ./teardown.sh && ./deploy.sh
+
+  ❌ Permission denied?
+     chmod +x *.sh
+
+┌───────────────────────────────────────────────────────────────┐
+│                      DOCKER COMMANDS                          │
+└───────────────────────────────────────────────────────────────┘
+
+  Start services:              docker-compose up -d
+  Stop services:               docker-compose stop
+  View logs:                   docker-compose logs -f
+  Check status:                docker-compose ps
+  Remove everything:           docker-compose down -v
+
+  Access backend shell:        docker exec -it echofix-backend sh
+  Access n8n shell:            docker exec -it echofix-n8n sh
+
+  Rebuild specific service:    docker-compose build backend
+                               docker-compose up -d backend
+
+┌───────────────────────────────────────────────────────────────┐
+│                         WORKFLOW                              │
+└───────────────────────────────────────────────────────────────┘
+
+  📦 First Time Setup:
+     1. cp backend/.env.example backend/.env
+     2. nano backend/.env  (add API keys or set DEMO_MODE=true)
+     3. ./deploy.sh
+     4. Open http://localhost:5678
+
+  🔧 Making Code Changes:
+     1. Edit files in backend/
+     2. ./rebuild.sh
+     3. ./logs.sh backend  (check for errors)
+
+  ⚙️  Changing Configuration:
+     1. Edit backend/.env
+     2. ./restart.sh
+
+  🎯 Demo Mode (No API Keys):
+     In backend/.env:
+       DEMO_MODE=true
+     Then:
+       ./deploy.sh
+
+┌───────────────────────────────────────────────────────────────┐
+│                      HEALTH CHECK                             │
+└───────────────────────────────────────────────────────────────┘
+
+  Test backend:
+    curl http://localhost:8000/health | python3 -m json.tool
+
+  Test n8n:
+    curl -I http://localhost:5678
+
+  Check container health:
+    docker ps --filter "name=echofix"
+
+┌───────────────────────────────────────────────────────────────┐
+│                    IMPORTANT FILES                            │
+└───────────────────────────────────────────────────────────────┘
+
+  backend/.env              → Configuration (API keys, settings)
+  docker-compose.yml        → Service definitions
+  backend/Dockerfile        → Backend container build
+
+  DEPLOYMENT.md             → Full deployment guide
+  QUICKSTART.md             → Quick start guide
+  COMMANDS.txt              → This file
+
+┌───────────────────────────────────────────────────────────────┐
+│                    GETTING HELP                               │
+└───────────────────────────────────────────────────────────────┘
+
+  📖 Documentation:
+     - QUICKSTART.md      (3-step setup)
+     - DEPLOYMENT.md      (detailed guide)
+     - backend/README.md  (API docs)
+
+  🔍 Debugging:
+     1. ./status.sh       (check overall health)
+     2. ./logs.sh         (view logs)
+     3. Check backend/.env for misconfigurations
+
+  💡 Common Issues:
+     - Missing API keys → Edit backend/.env
+     - Port conflicts → Kill processes on 8000/5678
+     - Docker not running → Start Docker Desktop
+
+╔═══════════════════════════════════════════════════════════════╗
+║  💡 TIP: Run ./status.sh anytime to check system health      ║
+╚═══════════════════════════════════════════════════════════════╝

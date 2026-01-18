@@ -23,6 +23,23 @@ services:
     networks:
       - echofix-network
 
+  # EchoFix Frontend Dashboard
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: echofix-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - echofix-network
+
   # n8n Workflow Automation (from existing docker-compose.yml)
   n8n:
     image: n8nio/n8n:latest
@@ -30,15 +47,19 @@ services:
     ports:
       - "5678:5678"
     environment:
-      - N8N_BASIC_AUTH_ACTIVE=false
+      # Use owner-based auth (modern n8n approach)
       - N8N_HOST=localhost
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
       - WEBHOOK_URL=http://localhost:5678
       - GENERIC_TIMEZONE=America/Los_Angeles
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change-this-to-random-string}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-409f6ce4a758126067eb74c4bf926fe06d0da080feb4aaff06a83703bcf1e648}
       # Backend API endpoint for n8n workflows
       - ECHOFIX_API_URL=http://backend:8000
+      # Disable instance customization survey
+      - N8N_PERSONALIZATION_ENABLED=false
+      # Keep user sessions longer
+      - N8N_USER_MANAGEMENT_JWT_DURATION_HOURS=168
     volumes:
       - n8n_data:/home/node/.n8n
       - ./workflows:/workflows:ro

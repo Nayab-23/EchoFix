@@ -1,9 +1,11 @@
 # Ignore local env files
 /backend/.env
+*/.env
+.env
+*.env.local
 
 # Python
 venv/
-.env
 backend/artifacts/
 *.pyc
 __pycache__/
@@ -11,6 +13,17 @@ __pycache__/
 # Node
 node_modules/
 /.next
+/frontend/.next
+/frontend/node_modules
+
+# Scripts with secrets (use env vars instead)
+close_pr.sh
+close_all_issues.sh
+close_all_prs_and_issues.sh
+*_with_token.sh
 
 # Misc
 .DS_Store
+*.log
+.vscode/
+.idea/

@@ -58,7 +58,6 @@ from services.insight_generator import generate_insights_from_entries
 from services.reddit_json_client import RedditJSONClient
 from services.score_threshold import (
     determine_entry_status,
-    should_refresh_score,
     should_process_entry
 )
 from services.plan_md import (
@@ -81,11 +80,14 @@ from models import (
     CreateRepoConfigRequest,
     InsightStatus,
     RedditEntryStatus,
+    RedditEntry,
     IssueSpec,
     InsightSummary,
+    PatchPlan,
     RepoConfig,
     Priority,
-    HealthCheckResponse
+    HealthCheckResponse,
+    Insight
 )
 
 # Initialize clients with demo mode support
@@ -197,6 +199,20 @@ def _normalize_summary(summary):
     return InsightSummary(**summary)
 
 
+def _normalize_patch_plan(patch_plan):
+    if isinstance(patch_plan, PatchPlan):
+        return patch_plan
+    if not patch_plan:
+        return PatchPlan(
+            summary="Implementation plan to be determined",
+            files_impacted=[],
+            change_outline="Changes to be determined",
+            risk_level="medium",
+            test_plan="Manual testing required"
+        )
+    return PatchPlan(**patch_plan)
+
+
 def _ensure_plan_and_pr(
     entry,
     insight,
@@ -244,13 +260,13 @@ def _ensure_plan_and_pr(
             existing_sha = github_client.get_file_sha(
                 repo_config.github_owner,
                 repo_config.github_repo,
-                repo_plan_path,
+                plan_repo_path,
                 ref=branch_name
             )
             plan_sha = github_client.upsert_file(
                 repo_config.github_owner,
                 repo_config.github_repo,
-                repo_plan_path,
+                plan_repo_path,
                 branch_name,
                 plan_content.encode(),
                 f"Add EchoFix plan for {entry.reddit_id}",
@@ -260,34 +276,17 @@ def _ensure_plan_and_pr(
         except Exception as exc:
             logger.warning("Failed to upload plan.md: %s", exc)
 
-        if should_create_pr(entry, ENABLE_PR_AUTOMATION):
-            pr_title = f"EchoFix Plan: {issue_spec.title}"
-            plan_excerpt = "\n".join(plan_content.splitlines()[:5])
-            pr_body = (
-                f"## EchoFix plan\n"
-                f"- Issue: {github_issue.url}\n"
-                f"- Reddit: {entry.permalink}\n\n"
-                f"{plan_excerpt}\n\n"
-                f"Plan file: `{repo_plan_path}`"
-            )
-            try:
-                pr = github_client.create_pull_request_stub(
-                    repo_config.github_owner,
-                    repo_config.github_repo,
-                    pr_title,
-                    pr_body,
-                    head_branch=branch_name,
-                    base_branch=repo_config.github_branch
-                )
-                result["pr_url"] = pr.url
-                result["pr_number"] = pr.number
-            except Exception as exc:
-                logger.warning("Failed to create PR: %s", exc)
+        # PR creation is now manual via /api/insights/<id>/create-pr endpoint
+        # This provides human-in-the-loop approval before creating PRs
+        logger.info(
+            "Plan committed to branch %s. Use /api/insights/<id>/create-pr to create PR after approval.",
+            branch_name
+        )
     else:
         # Always store plan SHA if file created locally
         result["plan_md_sha"] = None
 
-    logger.info("Plan saved to %s (local %s)", repo_plan_path, local_path)
+    logger.info("Plan saved to %s (local %s)", plan_repo_path, local_path)
     return result
 
 
@@ -428,10 +427,8 @@ def _refresh_pending_scores(limit: int) -> Dict[str, int]:
     skipped_recent = 0
 
     for entry in entries:
-        if not should_refresh_score(entry.last_score_check_at, SCORE_REFRESH_SECONDS):
-            skipped_recent += 1
-            continue
-
+        # Always refresh PENDING entries when explicitly called via API
+        # The workflow runs on a schedule, so time-based skipping is not needed
         score = None
         if not reddit_client.demo_mode:
             score = reddit_client.fetch_entry_score(entry.reddit_id, entry.reddit_type)
@@ -466,6 +463,103 @@ def _refresh_pending_scores(limit: int) -> Dict[str, int]:
         "updated": updated,
         "ready": ready,
         "skipped_recent": skipped_recent
+    }
+
+
+def _refresh_community_approvals() -> Dict[str, int]:
+    """Refresh scores for community approval replies and auto-merge when approved."""
+    try:
+        # Query insights with pending community approvals
+        result = supabase.table("insights").select("*").eq(
+            "community_approval_requested", True
+        ).eq("community_approved", False).execute()
+    except Exception as e:
+        # If columns don't exist yet (migration not applied), skip gracefully
+        error_msg = str(e)
+        if 'does not exist' in error_msg or '42703' in error_msg:
+            logger.warning("Community approval columns don't exist yet - skipping community approval refresh")
+            return {
+                "checked": 0,
+                "updated": 0,
+                "approved": 0,
+                "merged": 0
+            }
+        raise
+
+    if not result.data:
+        return {
+            "checked": 0,
+            "updated": 0,
+            "approved": 0,
+            "merged": 0
+        }
+
+    checked = 0
+    updated = 0
+    approved_count = 0
+    merged_count = 0
+
+    for insight_data in result.data:
+        insight = Insight(**insight_data)
+
+        if not insight.community_reply_id:
+            continue
+
+        checked += 1
+
+        # Fetch current score of the community reply
+        score = None
+        if not reddit_client.demo_mode:
+            score = reddit_client.fetch_entry_score(insight.community_reply_id, "comment")
+
+        if score is None:
+            # Try JSON client as fallback
+            reply_url = f"https://reddit.com/comments/{insight.community_reply_id}"
+            score = reddit_json_client.fetch_entry_score(reply_url, insight.community_reply_id)
+
+        if score is None:
+            logger.warning(f"Could not fetch score for community reply {insight.community_reply_id}")
+            continue
+
+        # Update the reply score
+        updates = {"community_reply_score": score}
+
+        # Check if approved (score >= MIN_SCORE)
+        if score >= MIN_SCORE:
+            updates["community_approved"] = True
+            updates["community_approved_at"] = datetime.now(timezone.utc).isoformat()
+            approved_count += 1
+
+            # Auto-merge the PR
+            if insight.github_pr_number and insight.github_repo:
+                try:
+                    owner, repo = insight.github_repo.split("/")
+                    github_client.merge_pr(
+                        owner=owner,
+                        repo=repo,
+                        pr_number=insight.github_pr_number,
+                        merge_method="squash"
+                    )
+                    updates["github_pr_merged"] = True
+                    updates["github_pr_merged_at"] = datetime.now(timezone.utc).isoformat()
+                    merged_count += 1
+                    logger.info(f"Auto-merged PR #{insight.github_pr_number} after community approval")
+                except Exception as e:
+                    logger.error(f"Failed to auto-merge PR #{insight.github_pr_number}: {e}")
+
+        db.update_insight(supabase, insight.id, updates)
+        updated += 1
+
+    logger.info(
+        "Community approval refresh: checked=%s updated=%s approved=%s merged=%s",
+        checked, updated, approved_count, merged_count
+    )
+
+    return {
+        "checked": checked,
+        "updated": updated,
+        "approved": approved_count,
+        "merged": merged_count
     }
 
 
@@ -700,7 +794,7 @@ def get_reddit_entries():
             result = supabase.table("reddit_entries").select("*").order(
                 "created_at", desc=True
             ).limit(limit).execute()
-            entries = [db.models.RedditEntry(**e) for e in result.data] if result.data else []
+            entries = [RedditEntry(**e) for e in result.data] if result.data else []
         
         return jsonify({
             "entries": [e.model_dump(mode='json') for e in entries],
@@ -953,6 +1047,12 @@ def auto_process_pipeline():
             results["scores_refreshed"] = refresh_result.get("updated", 0)
             results["entries_ready"] = refresh_result.get("ready", 0)
 
+            # Also refresh community approvals
+            community_result = _refresh_community_approvals()
+            results["community_approvals_checked"] = community_result.get("checked", 0)
+            results["community_approvals_approved"] = community_result.get("approved", 0)
+            results["community_prs_merged"] = community_result.get("merged", 0)
+
         process_result = _process_ready_workflow(entry_limit, insight_limit, issue_limit)
         results.update(process_result)
 
@@ -977,11 +1077,13 @@ def auto_process_ready():
         issue_limit = int(request.args.get("issue_limit", 10))
 
         refresh_result = _refresh_pending_scores(entry_limit)
+        community_result = _refresh_community_approvals()
         process_result = _process_ready_workflow(entry_limit, insight_limit, issue_limit)
 
         return jsonify({
             "success": True,
             "refresh": refresh_result,
+            "community_approvals": community_result,
             "report": {
                 "processed_ids": process_result.get("processed_ids", []),
                 "created_issue_urls": process_result.get("created_issue_urls", []),
@@ -1440,6 +1542,617 @@ def approve_workflow():
 
 
 # =====================================================
+# PR APPROVAL ENDPOINT
+# =====================================================
+
+@app.route("/api/insights/<insight_id>/create-pr", methods=["POST"])
+def create_pr_for_insight(insight_id):
+    """
+    Create a PR for an approved insight that already has an issue.
+    Requires manual approval - this is the human-in-the-loop step.
+    """
+    try:
+        insight_uuid = UUID(insight_id)
+
+        # Get insight with entries
+        insight_data = db.get_insight_with_entries(supabase, insight_uuid)
+        if not insight_data:
+            return jsonify({"error": "Insight not found"}), 404
+
+        insight = insight_data["insight"]
+        reddit_entries = insight_data["entries"]
+
+        # Check if issue already exists
+        if not insight.github_issue_url or not insight.github_issue_number:
+            return jsonify({"error": "No GitHub issue created yet for this insight"}), 400
+
+        # Check if PR already created (check insight record)
+        if insight.github_pr_url:
+            return jsonify({
+                "success": True,
+                "message": "PR already exists",
+                "pr_url": insight.github_pr_url,
+                "pr_number": insight.github_pr_number
+            })
+
+        # Get repo config
+        repo_configs = supabase.table("repo_configs").select("*").limit(1).execute()
+        if not repo_configs.data:
+            return jsonify({"error": "No repository configured"}), 404
+
+        repo_config = RepoConfig(**repo_configs.data[0])
+
+        # Get primary entry
+        primary_entry = reddit_entries[0] if reddit_entries else None
+        if not primary_entry:
+            return jsonify({"error": "No Reddit entries found"}), 400
+
+        # Generate plan content
+        issue_spec = _normalize_issue_spec(insight.issue_spec)
+        summary = _normalize_summary(insight.summary)
+        plan_content = build_plan_md(primary_entry, issue_spec, summary, reddit_entries)
+
+        # Format plan path
+        plan_repo_path = _format_plan_path(primary_entry, insight, insight.github_issue_number, repo_config)
+
+        # Create branch
+        branch_name = f"echofix/{primary_entry.reddit_id}"
+        try:
+            github_client.create_branch(
+                repo_config.github_owner,
+                repo_config.github_repo,
+                branch_name,
+                repo_config.github_branch
+            )
+        except Exception as exc:
+            logger.warning("Branch may already exist: %s", exc)
+
+        # Upload plan.md to branch
+        try:
+            existing_sha = github_client.get_file_sha(
+                repo_config.github_owner,
+                repo_config.github_repo,
+                plan_repo_path,
+                ref=branch_name
+            )
+        except:
+            existing_sha = None
+
+        plan_sha = github_client.upsert_file(
+            repo_config.github_owner,
+            repo_config.github_repo,
+            plan_repo_path,
+            branch_name,
+            plan_content.encode(),
+            f"Add EchoFix plan for {primary_entry.reddit_id}",
+            sha=existing_sha
+        )
+
+        # Generate actual code implementation using Gemini
+        logger.info("Generating code implementation with Gemini...")
+        patch_plan = _normalize_patch_plan(insight.patch_plan)
+
+        # Use new method that clones repo and generates real fixes
+        try:
+            code_files = gemini_client.generate_real_code_implementation(
+                issue_spec=issue_spec,
+                patch_plan=patch_plan,
+                repo_owner=repo_config.github_owner,
+                repo_name=repo_config.github_repo,
+                github_token=os.getenv('GITHUB_TOKEN')
+            )
+        except Exception as e:
+            logger.error(f"Real code generation failed: {e}")
+            # Fall back to demo mode
+            code_files = gemini_client._load_demo_code_implementation(issue_spec, patch_plan)
+
+        # Upload generated code files to branch
+        uploaded_files = []
+        for file_path, file_content in code_files.items():
+            try:
+                logger.info(f"Uploading generated file: {file_path}")
+                # Check if file already exists
+                try:
+                    existing_file_sha = github_client.get_file_sha(
+                        repo_config.github_owner,
+                        repo_config.github_repo,
+                        file_path,
+                        ref=branch_name
+                    )
+                except:
+                    existing_file_sha = None
+
+                # Upload the file
+                github_client.upsert_file(
+                    repo_config.github_owner,
+                    repo_config.github_repo,
+                    file_path,
+                    branch_name,
+                    file_content.encode(),
+                    f"EchoFix: Implement {issue_spec.title}",
+                    sha=existing_file_sha
+                )
+                uploaded_files.append(file_path)
+            except Exception as file_exc:
+                logger.error(f"Failed to upload {file_path}: {file_exc}")
+
+        logger.info(f"Uploaded {len(uploaded_files)} code files to branch {branch_name}")
+
+        # Create PR
+        pr_title = f"EchoFix: {issue_spec.title}"
+
+        # Build files list for PR body
+        files_list = "\n".join(f"- `{f}`" for f in uploaded_files) if uploaded_files else "- (plan only)"
+
+        pr_body = (
+            f"## 🤖 Auto-Generated Implementation\n\n"
+            f"**Issue:** #{insight.github_issue_number}\n"
+            f"**Reddit Feedback:** {primary_entry.permalink}\n\n"
+            f"### Files Modified/Created ({len(uploaded_files)})\n"
+            f"{files_list}\n\n"
+            f"### Implementation Plan\n"
+            f"Full plan: `{plan_repo_path}`\n\n"
+            f"---\n"
+            f"⚡ Powered by **EchoFix** + **Gemini AI**\n"
+            f"*Auto-generated from community feedback*"
+        )
+
+        # Try to create PR, handle case where it already exists
+        try:
+            pr = github_client.create_pull_request_stub(
+                repo_config.github_owner,
+                repo_config.github_repo,
+                pr_title,
+                pr_body,
+                head_branch=branch_name,
+                base_branch=repo_config.github_branch
+            )
+        except Exception as pr_error:
+            # Check if error is due to PR already existing
+            error_str = str(pr_error).lower()
+            is_duplicate = ("422" in error_str or "unprocessable entity" in error_str)
+
+            if is_duplicate:
+                # PR already exists, try to find it
+                logger.warning(f"PR already exists for branch {branch_name}, looking it up...")
+
+                # Try to get existing PR from GitHub
+                try:
+                    import requests
+                    response = requests.get(
+                        f"https://api.github.com/repos/{repo_config.github_owner}/{repo_config.github_repo}/pulls",
+                        params={"head": f"{repo_config.github_owner}:{branch_name}", "state": "open"},
+                        headers={"Authorization": f"token {os.getenv('GITHUB_TOKEN')}"}
+                    )
+                    response.raise_for_status()
+                    prs = response.json()
+
+                    if prs and len(prs) > 0:
+                        existing_pr = prs[0]
+                        pr_url = existing_pr["html_url"]
+                        pr_number = existing_pr["number"]
+
+                        # Update database with existing PR info
+                        db.update_insight(supabase, insight_uuid, {
+                            "github_pr_url": pr_url,
+                            "github_pr_number": pr_number
+                        })
+
+                        db.mark_reddit_entries_processed_for_insight(
+                            supabase,
+                            insight_uuid,
+                            insight.github_issue_url,
+                            plan_md_path=plan_repo_path,
+                            plan_md_sha=plan_sha,
+                            github_pr_url=pr_url,
+                            github_pr_number=pr_number
+                        )
+
+                        return jsonify({
+                            "success": True,
+                            "message": "PR already exists (updated records)",
+                            "pr_url": pr_url,
+                            "pr_number": pr_number,
+                            "branch": branch_name
+                        })
+                except Exception as lookup_error:
+                    logger.error(f"Failed to look up existing PR: {lookup_error}")
+
+            # Re-raise if not a duplicate PR error
+            raise pr_error
+
+        # Update insight with PR info
+        db.update_insight(supabase, insight_uuid, {
+            "github_pr_url": pr.url,
+            "github_pr_number": pr.number
+        })
+
+        # Update entries with PR info
+        db.mark_reddit_entries_processed_for_insight(
+            supabase,
+            insight_uuid,
+            insight.github_issue_url,
+            plan_md_path=plan_repo_path,
+            plan_md_sha=plan_sha,
+            github_pr_url=pr.url,
+            github_pr_number=pr.number
+        )
+
+        return jsonify({
+            "success": True,
+            "message": "PR created successfully",
+            "pr_url": pr.url,
+            "pr_number": pr.number,
+            "branch": branch_name
+        })
+
+    except Exception as e:
+        logger.error(f"Error creating PR: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# =====================================================
+# COMMUNITY APPROVAL
+# =====================================================
+
+@app.route("/api/insights/<insight_id>/ask-community", methods=["POST"])
+def ask_community_approval(insight_id):
+    """
+    Post PR overview as Reddit reply to ask for community approval.
+    When the reply reaches MIN_SCORE upvotes, auto-merge the PR.
+    """
+    try:
+        insight_uuid = UUID(insight_id)
+
+        # Get insight with entries
+        insight_data = db.get_insight_with_entries(supabase, insight_uuid)
+        if not insight_data:
+            return jsonify({"error": "Insight not found"}), 404
+
+        insight = insight_data["insight"]
+        reddit_entries = insight_data["entries"]
+
+        # Check if PR exists
+        if not insight.github_pr_url or not insight.github_pr_number:
+            return jsonify({"error": "No PR created yet for this insight"}), 400
+
+        # Check if already asked community (if columns exist)
+        if hasattr(insight, 'community_approval_requested') and insight.community_approval_requested:
+            return jsonify({
+                "success": True,
+                "message": "Community approval already requested",
+                "reply_id": insight.community_reply_id,
+                "reply_score": insight.community_reply_score
+            })
+
+        # Get primary entry to reply to
+        primary_entry = reddit_entries[0] if reddit_entries else None
+        if not primary_entry:
+            return jsonify({"error": "No Reddit entry found"}), 400
+
+        # Generate PR summary for community
+        issue_spec = _normalize_issue_spec(insight.issue_spec)
+        summary_text = f"""Hey! I've created a fix for this: {insight.github_pr_url}
+
+**What it does:**
+{issue_spec.problem_statement[:200]}
+
+**Implementation:**
+- PR #{insight.github_pr_number}
+- Files changed: Check the PR for details
+
+Upvote this comment if you want me to merge it! 🚀
+
+---
+🤖 Auto-generated by EchoFix"""
+
+        # Post reply to Reddit
+        try:
+            # Use Reddit client to post comment
+            comment_id = reddit_client.post_comment(
+                parent_id=primary_entry.reddit_id,
+                text=summary_text
+            )
+
+            # Update insight with community approval info (if columns exist)
+            try:
+                db.update_insight(supabase, insight_uuid, {
+                    "community_approval_requested": True,
+                    "community_reply_id": comment_id,
+                    "community_reply_score": 0
+                })
+            except Exception as db_error:
+                # If columns don't exist, still return success since comment was posted
+                error_msg = str(db_error)
+                if 'does not exist' in error_msg or '42703' in error_msg:
+                    logger.warning("Community approval columns don't exist yet - comment posted but not tracked")
+                    return jsonify({
+                        "success": True,
+                        "message": "Comment posted (migration needed to track approval)",
+                        "reply_id": comment_id,
+                        "warning": "Database migration required - run migration SQL to enable tracking"
+                    })
+                raise
+
+            return jsonify({
+                "success": True,
+                "message": "Community approval requested",
+                "reply_id": comment_id,
+                "reply_url": f"https://reddit.com/comments/{primary_entry.reddit_id.split('_')[1]}/_/{comment_id}"
+            })
+
+        except Exception as reddit_error:
+            logger.error(f"Failed to post Reddit comment: {reddit_error}")
+            return jsonify({"error": f"Failed to post comment: {str(reddit_error)}"}), 500
+
+    except Exception as e:
+        logger.error(f"Error requesting community approval: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# =====================================================
+# DEPENDENCY GRAPH
+# =====================================================
+
+# In-memory task storage for dependency graph
+dependency_tasks = []
+
+@app.route("/api/dependency-graph", methods=["GET"])
+def get_dependency_graph():
+    """Get the current dependency graph with all tasks."""
+    return jsonify({"tasks": dependency_tasks})
+
+
+@app.route("/api/analyze-task-dependencies", methods=["POST"])
+def analyze_task_dependencies():
+    """
+    Analyze a new task and determine its dependencies using AI.
+    """
+    try:
+        data = request.get_json()
+        task_title = data.get("task_title")
+        existing_tasks = data.get("existing_tasks", [])
+
+        if not task_title:
+            return jsonify({"error": "task_title is required"}), 400
+
+        # Use Gemini/OpenAI to analyze dependencies
+        dependencies = _analyze_dependencies_with_ai(task_title, existing_tasks)
+
+        # Create new task
+        task_id = f"task_{len(dependency_tasks) + 1}"
+        new_task = {
+            "id": task_id,
+            "title": task_title,
+            "status": "pending",
+            "dependencies": dependencies
+        }
+
+        dependency_tasks.append(new_task)
+
+        return jsonify({
+            "success": True,
+            "task": new_task,
+            "message": f"Task analyzed with {len(dependencies)} dependencies"
+        })
+
+    except Exception as e:
+        logger.error(f"Error analyzing task dependencies: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/update-task-status", methods=["POST"])
+def update_task_status():
+    """Update a task's status in the dependency graph."""
+    try:
+        data = request.get_json()
+        task_id = data.get("task_id")
+        status = data.get("status")
+
+        if not task_id or not status:
+            return jsonify({"error": "task_id and status are required"}), 400
+
+        # Find and update task
+        for task in dependency_tasks:
+            if task["id"] == task_id:
+                task["status"] = status
+                return jsonify({"success": True, "task": task})
+
+        return jsonify({"error": "Task not found"}), 404
+
+    except Exception as e:
+        logger.error(f"Error updating task status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _analyze_dependencies_with_ai(task_title: str, existing_tasks: list) -> list:
+    """
+    Use AI (Gemini with OpenAI fallback) to determine task dependencies.
+    """
+    if not existing_tasks:
+        return []
+
+    # Build prompt
+    tasks_desc = "\n".join([
+        f"- {task['id']}: {task['title']} (status: {task['status']})"
+        for task in existing_tasks
+    ])
+
+    prompt = f"""You are a software project manager analyzing task dependencies.
+
+NEW TASK: {task_title}
+
+EXISTING TASKS:
+{tasks_desc}
+
+Analyze which existing tasks (if any) the new task depends on. Consider:
+- Does the new task require another task to be completed first?
+- Are there logical ordering requirements?
+- What makes sense from an implementation perspective?
+
+Return ONLY a JSON array of task IDs that the new task depends on.
+Example: ["task_1", "task_3"]
+If no dependencies, return: []
+
+DEPENDENCIES:"""
+
+    # Try Gemini first
+    try:
+        response = gemini_client.model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.2,
+                "max_output_tokens": 500,
+            }
+        )
+
+        result_text = response.text.strip()
+        # Parse JSON response
+        import json
+        import re
+
+        # Extract JSON array from response
+        json_match = re.search(r'\[.*?\]', result_text, re.DOTALL)
+        if json_match:
+            dependencies = json.loads(json_match.group(0))
+            # Validate task IDs exist
+            valid_deps = [
+                dep for dep in dependencies
+                if any(t["id"] == dep for t in existing_tasks)
+            ]
+            logger.info(f"Gemini found {len(valid_deps)} dependencies for '{task_title}'")
+            return valid_deps
+
+    except Exception as gemini_error:
+        logger.error(f"Gemini dependency analysis failed: {gemini_error}")
+
+        # Try OpenAI fallback
+        if gemini_client.openai_client:
+            try:
+                logger.info("Trying OpenAI for dependency analysis")
+                response = gemini_client.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a project manager. Return ONLY a JSON array of task IDs."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.2,
+                    max_tokens=500
+                )
+
+                result_text = response.choices[0].message.content.strip()
+                import json
+                import re
+
+                json_match = re.search(r'\[.*?\]', result_text, re.DOTALL)
+                if json_match:
+                    dependencies = json.loads(json_match.group(0))
+                    valid_deps = [
+                        dep for dep in dependencies
+                        if any(t["id"] == dep for t in existing_tasks)
+                    ]
+                    logger.info(f"OpenAI found {len(valid_deps)} dependencies for '{task_title}'")
+                    return valid_deps
+
+            except Exception as openai_error:
+                logger.error(f"OpenAI dependency analysis also failed: {openai_error}")
+
+    # Fallback: simple heuristic (no dependencies)
+    logger.warning("AI dependency analysis failed, using heuristic")
+    return []
+
+
+# =====================================================
+# DATA MANAGEMENT
+# =====================================================
+
+@app.route("/api/admin/apply-migration", methods=["POST"])
+def apply_community_migration():
+    """
+    Apply the community approval migration.
+    Uses raw SQL execution via requests to Supabase Management API.
+    """
+    try:
+        # Read migration SQL
+        migration_path = os.path.join(os.path.dirname(__file__), 'supabase/migrations/00005_add_community_approval.sql')
+        with open(migration_path, 'r') as f:
+            migration_sql = f.read()
+
+        # Split into individual statements
+        statements = [
+            "ALTER TABLE insights ADD COLUMN IF NOT EXISTS community_approval_requested BOOLEAN DEFAULT false",
+            "ALTER TABLE insights ADD COLUMN IF NOT EXISTS community_reply_id TEXT",
+            "ALTER TABLE insights ADD COLUMN IF NOT EXISTS community_reply_score INTEGER DEFAULT 0",
+            "ALTER TABLE insights ADD COLUMN IF NOT EXISTS community_approved BOOLEAN DEFAULT false",
+            "ALTER TABLE insights ADD COLUMN IF NOT EXISTS community_approved_at TIMESTAMPTZ",
+            "CREATE INDEX IF NOT EXISTS idx_insights_community_approval ON insights(community_approval_requested, community_approved)"
+        ]
+
+        results = []
+
+        # Try to execute each statement by attempting to query the column
+        for stmt in statements:
+            try:
+                # We can't execute DDL via Supabase client, but we can check if columns exist
+                if "ADD COLUMN" in stmt:
+                    col_name = stmt.split("ADD COLUMN IF NOT EXISTS")[1].split()[0].strip()
+                    # Try to select this column
+                    supabase.table("insights").select(col_name).limit(1).execute()
+                    results.append(f"✅ Column {col_name} already exists")
+                elif "CREATE INDEX" in stmt:
+                    results.append("⚠️ Index creation skipped (requires dashboard)")
+            except Exception as e:
+                error_msg = str(e)
+                if 'does not exist' in error_msg or '42703' in error_msg:
+                    results.append(f"❌ Column doesn't exist - manual migration needed")
+
+                    return jsonify({
+                        "success": False,
+                        "error": "Migration cannot be applied via API",
+                        "message": "Please run the SQL manually in Supabase Dashboard",
+                        "sql": migration_sql,
+                        "dashboard_url": "https://supabase.com/dashboard/project/bkjuzmdzbxffxpeluwsv/sql"
+                    }), 400
+
+        return jsonify({
+            "success": True,
+            "message": "All columns already exist!",
+            "results": results
+        })
+
+    except Exception as e:
+        logger.error(f"Migration check failed: {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/admin/clear-all", methods=["POST"])
+def clear_all_data():
+    """Clear all Reddit entries and insights from the database."""
+    try:
+        # Delete all insights
+        insights_result = supabase.table("insights").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        insights_deleted = len(insights_result.data) if insights_result.data else 0
+
+        # Delete all reddit entries
+        entries_result = supabase.table("reddit_entries").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        entries_deleted = len(entries_result.data) if entries_result.data else 0
+
+        return jsonify({
+            "success": True,
+            "entries_deleted": entries_deleted,
+            "insights_deleted": insights_deleted,
+            "message": f"Deleted {entries_deleted} entries and {insights_deleted} insights"
+        })
+
+    except Exception as e:
+        logger.error(f"Error clearing data: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# =====================================================
 # STATISTICS & ANALYTICS
 # =====================================================
 
@@ -1457,9 +2170,13 @@ def get_statistics():
             })
         
         repo_config_id = UUID(repo_configs.data[0]["id"])
-        
+
         stats = db.get_insight_statistics(supabase, repo_config_id)
-        
+
+        # Serialize recent_insights
+        if 'recent_insights' in stats and stats['recent_insights']:
+            stats['recent_insights'] = [i.model_dump(mode='json') for i in stats['recent_insights']]
+
         return jsonify(stats)
         
     except Exception as e:

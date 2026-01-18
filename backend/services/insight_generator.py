@@ -55,57 +55,42 @@ def generate_insights_from_entries(
     repo_config_id: UUID,
     entries: List[RedditEntry]
 ) -> Dict[str, Any]:
-    """Create or update insights and attach entries to them."""
-    grouped: Dict[str, Dict[str, Any]] = {}
-
-    for entry in entries:
-        theme, description = _classify_entry(entry)
-        group = grouped.setdefault(
-            theme,
-            {"description": description, "entries": []}
-        )
-        group["entries"].append(entry)
-
+    """Create one insight per entry for specific, actionable feedback."""
     insights = []
     created_count = 0
-    updated_count = 0
     processed_count = 0
 
-    for theme, group in grouped.items():
-        existing = db.search_insights(supabase, repo_config_id, theme, limit=1)
+    for entry in entries:
+        # Use the actual comment text as the insight title for specificity
+        # Truncate to first sentence or 100 chars
+        body_text = entry.body.strip()
+        first_sentence = body_text.split('.')[0] if '.' in body_text else body_text
+        title = first_sentence[:100] + ('...' if len(first_sentence) > 100 else '')
 
-        if existing:
-            insight = existing[0]
-            new_count = len(group["entries"])
-            insight = db.update_insight(supabase, insight.id, {
-                "description": group["description"],
-                "entry_count": (insight.entry_count or 0) + new_count
-            })
-            updated_count += 1
-        else:
-            insight_data = {
-                "theme": theme,
-                "description": group["description"],
-                "entry_count": len(group["entries"]),
-                "unwrap_groups": [],
-                "repo_config_id": str(repo_config_id),
-                "status": InsightStatus.PENDING.value
-            }
-            insight = db.create_insight(supabase, insight_data)
-            created_count += 1
+        # Create one insight per entry for maximum specificity
+        insight_data = {
+            "theme": title,
+            "description": body_text[:200] + ('...' if len(body_text) > 200 else ''),
+            "entry_count": 1,
+            "unwrap_groups": [],
+            "repo_config_id": str(repo_config_id),
+            "status": InsightStatus.PENDING.value
+        }
+        insight = db.create_insight(supabase, insight_data)
+        created_count += 1
 
-        for entry in group["entries"]:
-            db.update_reddit_entry(supabase, entry.id, {
-                "insight_id": str(insight.id),
-                "status": RedditEntryStatus.PROCESSING.value
-            })
-            processed_count += 1
+        # Link entry to insight
+        db.update_reddit_entry(supabase, entry.id, {
+            "insight_id": str(insight.id),
+            "status": RedditEntryStatus.PROCESSING.value
+        })
+        processed_count += 1
 
         insights.append(insight)
 
     return {
         "entries_processed": processed_count,
         "insights_created": created_count,
-        "insights_updated": updated_count,
+        "insights_updated": 0,
         "insights": [i.model_dump(mode="json") for i in insights]
     }

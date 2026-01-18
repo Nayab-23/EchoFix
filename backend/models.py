@@ -227,7 +227,14 @@ class Insight(BaseModel):
     github_issue_url: Optional[str] = None
     github_pr_number: Optional[int] = None
     github_pr_url: Optional[str] = None
-    
+
+    # Community approval
+    community_approval_requested: Optional[bool] = False
+    community_reply_id: Optional[str] = None
+    community_reply_score: Optional[int] = 0
+    community_approved: Optional[bool] = False
+    community_approved_at: Optional[datetime] = None
+
     # Metadata
     repo_config_id: UUID
     approved_by: Optional[UUID] = None
