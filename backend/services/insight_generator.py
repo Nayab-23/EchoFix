@@ -3,11 +3,14 @@ Local insight generation for EchoFix.
 Groups Reddit entries into simple themes without external services.
 """
 
+import logging
 from typing import List, Dict, Tuple, Any
 from uuid import UUID
 
 from models import RedditEntry, InsightStatus, RedditEntryStatus
 import db
+
+logger = logging.getLogger(__name__)
 
 
 THEME_RULES = [
@@ -61,9 +64,14 @@ def generate_insights_from_entries(
     processed_count = 0
 
     for entry in entries:
+        # Skip removed/deleted Reddit entries
+        body_text = entry.body.strip()
+        if body_text in ['[removed]', '[deleted]', '']:
+            logger.info(f"Skipping removed/deleted entry: {entry.id}")
+            continue
+
         # Use the actual comment text as the insight title for specificity
         # Truncate to first sentence or 100 chars
-        body_text = entry.body.strip()
         first_sentence = body_text.split('.')[0] if '.' in body_text else body_text
         title = first_sentence[:100] + ('...' if len(first_sentence) > 100 else '')
 

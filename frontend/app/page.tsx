@@ -91,13 +91,14 @@ export default function Home() {
 
   return (
     <div className="h-screen relative overflow-hidden">
-      {/* Beautiful charcoal gradient background */}
-      <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900" />
-      <div className="absolute inset-0 bg-gradient-to-tr from-purple-900/20 via-transparent to-blue-900/20" />
+      {/* Dark gradient background with animated mesh */}
+      <div className="absolute inset-0 bg-gradient-to-br from-gray-950 via-slate-900 to-gray-950" />
+      <div className="absolute inset-0 bg-gradient-to-tr from-purple-950/40 via-blue-950/20 to-violet-950/40" />
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-purple-900/20 via-transparent to-transparent" />
 
       <div className="relative z-10 p-6 grid grid-cols-12 gap-6 h-screen">
         {/* Left Sidebar */}
-        <Card className="col-span-2 backdrop-blur-xl bg-white/10 border border-white/20 rounded-3xl p-6 h-fit flex flex-col">
+        <Card className="col-span-2 backdrop-blur-2xl bg-white/5 border border-white/10 shadow-2xl shadow-purple-900/20 rounded-3xl p-6 h-fit flex flex-col">
           <div className="space-y-6">
             {/* Logo */}
             <div className="text-center">
@@ -111,7 +112,7 @@ export default function Home() {
               <nav className="space-y-2">
                 {[
                   { icon: MessageSquare, label: "Dashboard", view: 'dashboard' as const },
-                  { icon: Network, label: "Dependency Graph", view: 'dependencies' as const },
+                  { icon: Network, label: "Dependencies", view: 'dependencies' as const },
                 ].map((item, index) => (
                   <Button
                     key={index}
@@ -183,7 +184,7 @@ export default function Home() {
         {/* Main Content Area */}
         <div className="col-span-10 space-y-6 h-screen overflow-y-auto">
           {/* Header Card */}
-          <Card className="backdrop-blur-xl bg-white/10 border border-white/20 rounded-3xl p-6">
+          <Card className="backdrop-blur-2xl bg-white/5 border border-white/10 shadow-xl shadow-purple-900/10 rounded-3xl p-6">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-3xl font-bold text-white">Dashboard 🚀</h2>
@@ -221,7 +222,7 @@ export default function Home() {
             ].map((stat, index) => (
               <Card
                 key={index}
-                className="backdrop-blur-xl bg-white/10 border border-white/20 rounded-3xl p-6 transition-all duration-700 ease-out hover:scale-[1.02] hover:bg-white/15"
+                className="backdrop-blur-2xl bg-white/5 border border-white/10 shadow-xl shadow-purple-900/10 rounded-3xl p-6 transition-all duration-700 ease-out hover:scale-[1.02] hover:bg-white/10"
               >
                 <div className="flex items-center justify-between">
                   <div>
@@ -239,7 +240,7 @@ export default function Home() {
           {activeView === 'dashboard' && (
             <>
               {/* Control Panel */}
-              <Card className="backdrop-blur-xl bg-white/10 border border-white/20 rounded-3xl p-6">
+              <Card className="backdrop-blur-2xl bg-white/5 border border-white/10 shadow-xl shadow-purple-900/10 rounded-3xl p-6">
                 <ControlPanel onRefresh={handleRefresh} />
               </Card>
 
@@ -247,7 +248,7 @@ export default function Home() {
               <InsightsPanel insights={insights} />
 
               {/* Reddit Entries Table */}
-          <Card className="backdrop-blur-xl bg-white/10 border border-white/20 rounded-3xl p-6">
+          <Card className="backdrop-blur-2xl bg-white/5 border border-white/10 shadow-xl shadow-purple-900/10 rounded-3xl p-6">
             <div className="mb-6">
               <h3 className="text-xl font-semibold text-white mb-4">Reddit Entries 📊</h3>
 

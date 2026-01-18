@@ -12,6 +12,7 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   MarkerType,
+  Position,
 } from 'reactflow'
 import dagre from 'dagre'
 import 'reactflow/dist/style.css'
@@ -49,8 +50,8 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
 
   nodes.forEach((node) => {
     const nodeWithPosition = dagreGraph.node(node.id)
-    node.targetPosition = isHorizontal ? 'left' : 'top'
-    node.sourcePosition = isHorizontal ? 'right' : 'bottom'
+    node.targetPosition = isHorizontal ? Position.Left : Position.Top
+    node.sourcePosition = isHorizontal ? Position.Right : Position.Bottom
 
     // We are shifting the dagre node position (anchor=center center) to the top left
     // so it matches the React Flow node anchor point (top left).
@@ -183,7 +184,7 @@ export default function DependencyGraph() {
   }, [])
 
   return (
-    <Card className="backdrop-blur-xl bg-white/10 border border-white/20 rounded-3xl p-6 h-[calc(100vh-8rem)]">
+    <Card className="backdrop-blur-2xl bg-white/5 border border-white/10 shadow-xl shadow-purple-900/10 rounded-3xl p-6 h-[calc(100vh-8rem)]">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-2xl font-bold text-white">Dependency Graph</h2>

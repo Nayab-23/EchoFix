@@ -1307,17 +1307,42 @@ def update_insight_status(insight_id: str):
     try:
         insight_uuid = UUID(insight_id)
         data = request.get_json()
-        
+
         status = InsightStatus(data["status"])
         user_id = UUID(data["user_id"]) if data.get("user_id") else None
-        
+
         insight = db.update_insight_status(supabase, insight_uuid, status, user_id)
-        
+
+        # Auto-add to dependency graph when marked as in_progress
+        if status == InsightStatus.IN_PROGRESS:
+            issue_spec = _normalize_issue_spec(insight.issue_spec)
+            task_title = issue_spec.title
+
+            # Check if task already exists
+            task_exists = any(t["title"] == task_title for t in dependency_tasks)
+
+            if not task_exists:
+                # Analyze dependencies with AI
+                dependencies = _analyze_dependencies_with_ai(task_title, dependency_tasks)
+
+                # Create new task
+                task_id = f"task_{len(dependency_tasks) + 1}"
+                new_task = {
+                    "id": task_id,
+                    "title": task_title,
+                    "status": "in_progress",
+                    "dependencies": dependencies,
+                    "insight_id": str(insight_uuid)
+                }
+
+                dependency_tasks.append(new_task)
+                logger.info(f"Auto-added task to dependency graph: {task_title}")
+
         return jsonify({
             "success": True,
             "insight": insight.model_dump(mode='json')
         })
-        
+
     except Exception as e:
         logger.error(f"Error updating insight status: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -1896,10 +1921,59 @@ Upvote this comment if you want me to merge it! 🚀
 
 # In-memory task storage for dependency graph
 dependency_tasks = []
+dependency_tasks_loaded = False
+
+def _ensure_dependency_tasks_loaded():
+    """Lazy-load dependency graph with existing in_progress insights on first access."""
+    global dependency_tasks_loaded
+
+    if dependency_tasks_loaded:
+        logger.debug("Dependency tasks already loaded")
+        return
+
+    logger.info("Loading dependency tasks from in_progress insights...")
+
+    try:
+        # Get all in_progress insights
+        insights = db.get_insights_by_status(supabase, InsightStatus.IN_PROGRESS)
+        logger.info(f"Found {len(insights)} in_progress insights")
+
+        for insight in insights:
+            try:
+                issue_spec = _normalize_issue_spec(insight.issue_spec)
+                task_title = issue_spec.title
+
+                # Check if task already exists
+                task_exists = any(t["title"] == task_title for t in dependency_tasks)
+
+                if not task_exists:
+                    task_id = f"task_{len(dependency_tasks) + 1}"
+                    new_task = {
+                        "id": task_id,
+                        "title": task_title,
+                        "status": "in_progress",
+                        "dependencies": [],  # No dependencies on initial load
+                        "insight_id": str(insight.id)
+                    }
+                    dependency_tasks.append(new_task)
+                    logger.info(f"Loaded existing in_progress task: {task_title}")
+                else:
+                    logger.debug(f"Task already exists: {task_title}")
+            except Exception as task_error:
+                logger.error(f"Error processing insight {insight.id}: {task_error}", exc_info=True)
+                continue
+
+        dependency_tasks_loaded = True
+        logger.info(f"Dependency graph initialized with {len(dependency_tasks)} tasks")
+
+    except Exception as e:
+        logger.error(f"Error populating dependency graph: {e}", exc_info=True)
+        dependency_tasks_loaded = True  # Mark as loaded anyway to avoid repeated errors
 
 @app.route("/api/dependency-graph", methods=["GET"])
 def get_dependency_graph():
     """Get the current dependency graph with all tasks."""
+    _ensure_dependency_tasks_loaded()
     return jsonify({"tasks": dependency_tasks})
 
 
