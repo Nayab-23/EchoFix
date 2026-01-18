@@ -1,0 +1,22 @@
+# Web Framework
+flask==3.0.0
+flask-cors==4.0.0
+
+# Database
+supabase==2.9.0
+httpx==0.27.0
+
+# Reddit API (optional for post-hackathon PRAW mode)
+praw==7.7.1
+
+# Google Gemini
+google-generativeai==0.8.3
+
+# Data validation
+pydantic>=2.9.0
+
+# Environment
+python-dotenv==1.0.1
+
+# Utilities
+requests==2.31.0

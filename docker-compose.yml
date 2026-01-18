@@ -1,0 +1,58 @@
+services:
+  # EchoFix Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: echofix-backend
+    ports:
+      - "8000:8000"
+    # Environment is provided by backend/.env (mount or env_file below)
+    env_file:
+      - ./backend/.env
+    volumes:
+      # Mount fixtures for demo mode
+      - ./backend/fixtures:/app/fixtures:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - echofix-network
+
+  # n8n Workflow Automation (from existing docker-compose.yml)
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: echofix-n8n
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=false
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678
+      - GENERIC_TIMEZONE=America/Los_Angeles
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change-this-to-random-string}
+      # Backend API endpoint for n8n workflows
+      - ECHOFIX_API_URL=http://backend:8000
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - echofix-network
+
+networks:
+  echofix-network:
+    driver: bridge
+
+volumes:
+  n8n_data:
+    driver: local
